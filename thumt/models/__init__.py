@@ -10,6 +10,7 @@ import thumt.models.rnnsearch
 import thumt.models.rnnsearch_lrp
 import thumt.models.transformer
 import thumt.models.transformer_lrp
+import thumt.models.transformer_onlstm_decoder
 
 
 def get_model(name, lrp=False):
@@ -28,6 +29,6 @@ def get_model(name, lrp=False):
         else:
             return thumt.models.transformer_lrp.TransformerLRP
     elif name == "transformer_onlstm_decoder":
-	return thumt.models.transformer_onlstm_deocder.Transformer
+	return thumt.models.transformer_onlstm_decoder.Transformer
     else:
         raise LookupError("Unknown model %s" % name)
