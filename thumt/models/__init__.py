@@ -27,5 +27,7 @@ def get_model(name, lrp=False):
             return thumt.models.transformer.Transformer
         else:
             return thumt.models.transformer_lrp.TransformerLRP
+    elif name == "transformer_onlstm_decoder":
+	return thumt.models.transformer_onlstm_deocder.Transformer
     else:
         raise LookupError("Unknown model %s" % name)
