@@ -157,14 +157,36 @@ def transformer_decoder(inputs, memory, bias, mem_bias, sequence_length, params,
             with tf.variable_scope(layer_name):
                 layer_state = state[layer_name] if state is not None else None
 
-                with tf.variable_scope("on-lstm"):
-                    with tf.variable_scope("forward"):
-                        outputs = _gru_encoder(cell_fw, x, None, sequence_length, state=layer_state, dtype=dtype) 
+                if layer<3:
+                    with tf.variable_scope("on-lstm"):
+                        with tf.variable_scope("forward"):
+                            outputs = _gru_encoder(cell_fw, x, None, sequence_length, state=layer_state, dtype=dtype) 
+                            if layer_state is not None:
+                                next_state[layer_name] = outputs["state"]
+                        y = layers.nn.linear(outputs["outputs"], params.hidden_size, False, False)
+                        x = _residual_fn(x, y, 1.0 - params.residual_dropout)
+                        x = _layer_process(x, params.layer_postprocess)
+                else:
+                    with tf.variable_scope("self_attention"):
+                        y = layers.attention.multihead_attention(
+                            _layer_process(x, params.layer_preprocess),
+                            None,
+                            bias,
+                            params.num_heads,
+                            params.attention_key_channels or params.hidden_size,
+                            params.attention_value_channels or params.hidden_size,
+                            params.hidden_size,
+                            1.0 - params.attention_dropout,
+                            state=layer_state,
+                            max_relative_dis=max_relative_dis,
+                        )
+
                         if layer_state is not None:
-                            next_state[layer_name] = outputs["state"]
-                    y = layers.nn.linear(outputs["outputs"], params.hidden_size, False, False)
-                    x = _residual_fn(x, y, 1.0 - params.residual_dropout)
-                    x = _layer_process(x, params.layer_postprocess)
+                            next_state[layer_name] = y["state"]
+
+                        y = y["outputs"]
+                        x = _residual_fn(x, y, 1.0 - params.residual_dropout)
+                        x = _layer_process(x, params.layer_postprocess)
 
                 with tf.variable_scope("encdec_attention"):
                     y = layers.attention.multihead_attention(
