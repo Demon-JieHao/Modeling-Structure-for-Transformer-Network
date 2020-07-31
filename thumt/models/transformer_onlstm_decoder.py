@@ -488,7 +488,9 @@ class Transformer(interface.NMTModel):
             adam_epsilon=1e-9,
             clip_grad_norm=0.0,
             use_variational_dropout=True,
-            dropout=0.0
+            dropout=0.0,
+            position_info_type="relative",
+            max_relative_dis=16
         )
 
         return params
