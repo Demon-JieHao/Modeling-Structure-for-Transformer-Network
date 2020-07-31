@@ -156,6 +156,8 @@ def transformer_decoder(inputs, memory, bias, mem_bias, sequence_length, params,
             layer_name = "layer_%d" % layer
             with tf.variable_scope(layer_name):
                 layer_state = state[layer_name] if state is not None else None
+                max_relative_dis = params.max_relative_dis \
+                        if params.position_info_type == 'relative' else None
 
                 if layer<3:
                     with tf.variable_scope("on-lstm"):
