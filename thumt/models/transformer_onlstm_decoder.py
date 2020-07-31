@@ -89,8 +89,8 @@ def _gru_encoder(cell, inputs, initial_state, tgt_len, state=None, dtype=None):
     dtype = dtype or inputs.dtype
     next_state={}
     if state is not None:
-        inputs = tf.concat([state["mem"], inputs], axis=1)
-        next_state["mem"] = inputs
+        inputs = tf.concat([state["key"], inputs], axis=1)
+        next_state["key"] = inputs
         #inputs1 = inputs1[:, -1:, :]
     batch = tf.shape(inputs)[0]
     time_steps = tf.shape(inputs)[1]
@@ -424,9 +424,14 @@ class Transformer(interface.NMTModel):
                     "encoder": encoder_output,
                     "decoder": {
                         "layer_%d" % i: {
-                            "mem": tf.zeros([batch, 0, params.hidden_size])
+                            "key": tf.zeros([batch, 0, params.hidden_size])
                         }
-                        for i in range(params.num_decoder_layers)
+                        for i in range(3)
+                        "layer_%d" % i: {
+                            "key": tf.zeros([batch, 0, params.hidden_size]),
+                            "value": tf.zeros([batch, 0, params.hidden_size])
+                        }
+                        for i in range(3, params.num_decoder_layers)
                     }
                 }
             return state
