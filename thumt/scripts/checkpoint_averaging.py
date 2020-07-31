@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding=utf-8
-# Copyright 2017-2019 The THUMT Authors
+# Copyright 2018 The THUMT Authors
 
 from __future__ import absolute_import
 from __future__ import division
@@ -9,7 +9,6 @@ from __future__ import print_function
 import argparse
 import operator
 import os
-import six
 
 import numpy as np
 import tensorflow as tf
@@ -101,7 +100,7 @@ def main(_):
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
         for p, assign_op, (name, value) in zip(placeholders, assign_ops,
-                                               six.iteritems(var_values)):
+                                               var_values.iteritems()):
             sess.run(assign_op, {p: value})
         saved_name = os.path.join(FLAGS.output, "average")
         saver.save(sess, saved_name, global_step=global_step)

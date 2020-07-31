@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2017-2019 The THUMT Authors
+# Copyright 2018 The THUMT Authors
 
 from __future__ import absolute_import
 from __future__ import division
@@ -8,11 +8,8 @@ from __future__ import print_function
 import copy
 
 import tensorflow as tf
+import thumt.interface as interface
 import thumt.layers as layers
-import thumt.losses as losses
-import thumt.utils as utils
-
-from thumt.models.model import NMTModel
 
 
 def _layer_process(x, mode):
@@ -31,7 +28,7 @@ def _residual_fn(x, y, keep_prob=None):
 
 
 def _ffn_layer(inputs, hidden_size, output_size, keep_prob=None,
-               dtype=None, scope=None):
+              dtype=None, scope=None):
     with tf.variable_scope(scope, default_name="ffn_layer", values=[inputs],
                            dtype=dtype):
         with tf.variable_scope("input_layer"):
@@ -54,9 +51,6 @@ def transformer_encoder(inputs, bias, params, dtype=None, scope=None):
         for layer in range(params.num_encoder_layers):
             with tf.variable_scope("layer_%d" % layer):
                 with tf.variable_scope("self_attention"):
-                    max_relative_dis = params.max_relative_dis \
-                        if params.position_info_type == 'relative' else None
-
                     y = layers.attention.multihead_attention(
                         _layer_process(x, params.layer_preprocess),
                         None,
@@ -65,8 +59,7 @@ def transformer_encoder(inputs, bias, params, dtype=None, scope=None):
                         params.attention_key_channels or params.hidden_size,
                         params.attention_value_channels or params.hidden_size,
                         params.hidden_size,
-                        1.0 - params.attention_dropout,
-                        max_relative_dis=max_relative_dis,
+                        1.0 - params.attention_dropout
                     )
                     y = y["outputs"]
                     x = _residual_fn(x, y, 1.0 - params.residual_dropout)
@@ -97,8 +90,6 @@ def transformer_decoder(inputs, memory, bias, mem_bias, params, state=None,
             layer_name = "layer_%d" % layer
             with tf.variable_scope(layer_name):
                 layer_state = state[layer_name] if state is not None else None
-                max_relative_dis = params.max_relative_dis \
-                        if params.position_info_type == 'relative' else None
 
                 with tf.variable_scope("self_attention"):
                     y = layers.attention.multihead_attention(
@@ -110,8 +101,7 @@ def transformer_decoder(inputs, memory, bias, mem_bias, params, state=None,
                         params.attention_value_channels or params.hidden_size,
                         params.hidden_size,
                         1.0 - params.attention_dropout,
-                        state=layer_state,
-                        max_relative_dis=max_relative_dis,
+                        state=layer_state
                     )
 
                     if layer_state is not None:
@@ -131,7 +121,6 @@ def transformer_decoder(inputs, memory, bias, mem_bias, params, state=None,
                         params.attention_value_channels or params.hidden_size,
                         params.hidden_size,
                         1.0 - params.attention_dropout,
-                        max_relative_dis=max_relative_dis,
                     )
                     y = y["outputs"]
                     x = _residual_fn(x, y, 1.0 - params.residual_dropout)
@@ -162,13 +151,12 @@ def encoding_graph(features, mode, params):
         params.relu_dropout = 0.0
         params.label_smoothing = 0.0
 
-    dtype = tf.get_variable_scope().dtype
     hidden_size = params.hidden_size
     src_seq = features["source"]
     src_len = features["source_length"]
     src_mask = tf.sequence_mask(src_len,
                                 maxlen=tf.shape(features["source"])[1],
-                                dtype=dtype or tf.float32)
+                                dtype=tf.float32)
 
     svocab = params.vocabulary["source"]
     src_vocab_size = len(svocab)
@@ -185,18 +173,15 @@ def encoding_graph(features, mode, params):
 
     bias = tf.get_variable("bias", [hidden_size])
 
-    inputs = tf.gather(src_embedding, src_seq)
-
-    if params.multiply_embedding_mode == "sqrt_depth":
-        inputs = inputs * (hidden_size ** 0.5)
-
+    # id => embedding
+    # src_seq: [batch, max_src_length]
+    inputs = tf.gather(src_embedding, src_seq) * (hidden_size ** 0.5)
     inputs = inputs * tf.expand_dims(src_mask, -1)
 
+    # Preparing encoder
     encoder_input = tf.nn.bias_add(inputs, bias)
-    enc_attn_bias = layers.attention.attention_bias(src_mask, "masking",
-                                                    dtype=dtype)
-    if params.position_info_type == 'absolute':
-        encoder_input = layers.attention.add_timing_signal(encoder_input)
+    encoder_input = layers.attention.add_timing_signal(encoder_input)
+    enc_attn_bias = layers.attention.attention_bias(src_mask, "masking")
 
     if params.residual_dropout:
         keep_prob = 1.0 - params.residual_dropout
@@ -214,16 +199,15 @@ def decoding_graph(features, state, mode, params):
         params.relu_dropout = 0.0
         params.label_smoothing = 0.0
 
-    dtype = tf.get_variable_scope().dtype
     tgt_seq = features["target"]
     src_len = features["source_length"]
     tgt_len = features["target_length"]
     src_mask = tf.sequence_mask(src_len,
                                 maxlen=tf.shape(features["source"])[1],
-                                dtype=dtype or tf.float32)
+                                dtype=tf.float32)
     tgt_mask = tf.sequence_mask(tgt_len,
                                 maxlen=tf.shape(features["target"])[1],
-                                dtype=dtype or tf.float32)
+                                dtype=tf.float32)
 
     hidden_size = params.hidden_size
     tvocab = params.vocabulary["target"]
@@ -246,21 +230,18 @@ def decoding_graph(features, state, mode, params):
         weights = tf.get_variable("softmax", [tgt_vocab_size, hidden_size],
                                   initializer=initializer)
 
-    targets = tf.gather(tgt_embedding, tgt_seq)
-
-    if params.multiply_embedding_mode == "sqrt_depth":
-        targets = targets * (hidden_size ** 0.5)
-
+    # id => embedding
+    # tgt_seq: [batch, max_tgt_length]
+    targets = tf.gather(tgt_embedding, tgt_seq) * (hidden_size ** 0.5)
     targets = targets * tf.expand_dims(tgt_mask, -1)
 
-    enc_attn_bias = layers.attention.attention_bias(src_mask, "masking",
-                                                    dtype=dtype)
+    # Preparing encoder and decoder input
+    enc_attn_bias = layers.attention.attention_bias(src_mask, "masking")
     dec_attn_bias = layers.attention.attention_bias(tf.shape(targets)[1],
-                                                    "causal", dtype=dtype)
+                                                    "causal")
     # Shift left
     decoder_input = tf.pad(targets, [[0, 0], [1, 0], [0, 0]])[:, :-1, :]
-    if params.position_info_type == 'absolute':
-        decoder_input = layers.attention.add_timing_signal(decoder_input)
+    decoder_input = layers.attention.add_timing_signal(decoder_input)
 
     if params.residual_dropout:
         keep_prob = 1.0 - params.residual_dropout
@@ -286,18 +267,18 @@ def decoding_graph(features, state, mode, params):
 
         return log_prob, {"encoder": encoder_output, "decoder": decoder_state}
 
+    # [batch, length, channel] => [batch * length, vocab_size]
     decoder_output = tf.reshape(decoder_output, [-1, hidden_size])
     logits = tf.matmul(decoder_output, weights, False, True)
     labels = features["target"]
 
     # label smoothing
-    ce = losses.smoothed_softmax_cross_entropy_with_logits(
+    ce = layers.nn.smoothed_softmax_cross_entropy_with_logits(
         logits=logits,
         labels=labels,
         smoothing=params.label_smoothing,
         normalize=True
     )
-    tgt_mask = tf.cast(tgt_mask, ce.dtype)
 
     ce = tf.reshape(ce, tf.shape(tgt_seq))
 
@@ -319,23 +300,20 @@ def model_graph(features, mode, params):
     return output
 
 
-class Transformer(NMTModel):
+class Transformer(interface.NMTModel):
 
     def __init__(self, params, scope="transformer"):
         super(Transformer, self).__init__(params=params, scope=scope)
 
-    def get_training_func(self, initializer, regularizer=None, dtype=None):
+    def get_training_func(self, initializer):
         def training_fn(features, params=None, reuse=None):
             if params is None:
                 params = copy.copy(self.parameters)
             else:
                 params = copy.copy(params)
 
-            custom_getter = utils.custom_getter if dtype else None
-
             with tf.variable_scope(self._scope, initializer=initializer,
-                                   regularizer=regularizer, reuse=reuse,
-                                   custom_getter=custom_getter, dtype=dtype):
+                                   reuse=reuse):
                 loss = model_graph(features, "train", params)
                 return loss
 
@@ -370,8 +348,8 @@ class Transformer(NMTModel):
                     "encoder": encoder_output,
                     "decoder": {
                         "layer_%d" % i: {
-                            "key": tf.zeros([batch, 0, params.attention_key_channels or params.hidden_size]),
-                            "value": tf.zeros([batch, 0, params.attention_value_channels or params.hidden_size])
+                            "key": tf.zeros([batch, 0, params.hidden_size]),
+                            "value": tf.zeros([batch, 0, params.hidden_size])
                         }
                         for i in range(params.num_decoder_layers)
                     }
@@ -415,8 +393,6 @@ class Transformer(NMTModel):
             label_smoothing=0.1,
             attention_key_channels=0,
             attention_value_channels=0,
-            layer_preprocess="none",
-            layer_postprocess="layer_norm",
             multiply_embedding_mode="sqrt_depth",
             shared_embedding_and_softmax_weights=False,
             shared_source_target_embedding=False,
@@ -425,16 +401,14 @@ class Transformer(NMTModel):
             initializer="uniform_unit_scaling",
             initializer_gain=1.0,
             learning_rate=1.0,
+            layer_preprocess="layer_norm",
+            layer_postprocess="none",
             batch_size=4096,
             constant_batch_size=False,
             adam_beta1=0.9,
             adam_beta2=0.98,
             adam_epsilon=1e-9,
-            clip_grad_norm=0.0,
-            # "absolute" or "relative"
-            position_info_type="relative",
-            # 8 for big model, 16 for base model, see (Shaw et al., 2018)
-            max_relative_dis=16
+            clip_grad_norm=0.0
         )
 
         return params

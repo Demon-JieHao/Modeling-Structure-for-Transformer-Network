@@ -156,8 +156,6 @@ def transformer_decoder(inputs, memory, bias, mem_bias, sequence_length, params,
             layer_name = "layer_%d" % layer
             with tf.variable_scope(layer_name):
                 layer_state = state[layer_name] if state is not None else None
-                max_relative_dis = params.max_relative_dis \
-                        if params.position_info_type == 'relative' else None
 
                 if layer<3:
                     with tf.variable_scope("on-lstm"):
@@ -179,8 +177,7 @@ def transformer_decoder(inputs, memory, bias, mem_bias, sequence_length, params,
                             params.attention_value_channels or params.hidden_size,
                             params.hidden_size,
                             1.0 - params.attention_dropout,
-                            state=layer_state,
-                            max_relative_dis=max_relative_dis,
+                            state=layer_state
                         )
 
                         if layer_state is not None:
@@ -488,9 +485,7 @@ class Transformer(interface.NMTModel):
             adam_epsilon=1e-9,
             clip_grad_norm=0.0,
             use_variational_dropout=True,
-            dropout=0.0,
-            position_info_type="relative",
-            max_relative_dis=16
+            dropout=0.0
         )
 
         return params

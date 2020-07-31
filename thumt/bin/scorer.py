@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding=utf-8
-# Copyright 2017-2019 The THUMT Authors
+# Copyright 2018 The THUMT Authors
 
 from __future__ import absolute_import
 from __future__ import division
@@ -9,7 +9,6 @@ from __future__ import print_function
 import argparse
 import itertools
 import os
-import six
 
 import tensorflow as tf
 import thumt.data.vocab as vocabulary
@@ -19,7 +18,7 @@ import thumt.models as models
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Translate using existing NMT models",
-        usage="scorer.py [<args>] [-h | --help]"
+        usage="translator.py [<args>] [-h | --help]"
     )
 
     # input files
@@ -65,12 +64,12 @@ def default_parameters():
 def merge_parameters(params1, params2):
     params = tf.contrib.training.HParams()
 
-    for (k, v) in six.iteritems(params1.values()):
+    for (k, v) in params1.values().iteritems():
         params.add_hparam(k, v)
 
     params_dict = params.values()
 
-    for (k, v) in six.iteritems(params2.values()):
+    for (k, v) in params2.values().iteritems():
         if k in params_dict:
             # Override
             setattr(params, k, v)

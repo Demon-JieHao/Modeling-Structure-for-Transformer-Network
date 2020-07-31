@@ -89,40 +89,75 @@ def get_training_input(filenames, params):
 
     :returns: A dictionary of pair <Key, Tensor>
     """
-
     with tf.device("/cpu:0"):
         src_dataset = tf.data.TextLineDataset(filenames[0])
         tgt_dataset = tf.data.TextLineDataset(filenames[1])
+        tgt_dataset_block0 = tf.data.TextLineDataset(filenames[2])
+        tgt_dataset_block1 = tf.data.TextLineDataset(filenames[3])
+        tgt_dataset_block2 = tf.data.TextLineDataset(filenames[4])
+        tgt_dataset_block3 = tf.data.TextLineDataset(filenames[5])
+        tgt_dataset_block4 = tf.data.TextLineDataset(filenames[6])
+        tgt_dataset_block5 = tf.data.TextLineDataset(filenames[7])
+        tgt_dataset_block6 = tf.data.TextLineDataset(filenames[8])
+        tgt_dataset_block7 = tf.data.TextLineDataset(filenames[9])
 
-        dataset = tf.data.Dataset.zip((src_dataset, tgt_dataset))
+        dataset = tf.data.Dataset.zip((src_dataset, tgt_dataset, tgt_dataset_block0, 
+            tgt_dataset_block1, tgt_dataset_block2, tgt_dataset_block3, tgt_dataset_block4, 
+            tgt_dataset_block5, tgt_dataset_block6, tgt_dataset_block7))
         dataset = dataset.shuffle(params.buffer_size)
         dataset = dataset.repeat()
 
         # Split string
         dataset = dataset.map(
-            lambda src, tgt: (
+            lambda src, tgt, tgt_b0, tgt_b1, tgt_b2, tgt_b3, tgt_b4, tgt_b5, tgt_b6, tgt_b7: (
                 tf.string_split([src]).values,
-                tf.string_split([tgt]).values
+                tf.string_split([tgt]).values,
+                tf.string_split([tgt_b0]).values,
+                tf.string_split([tgt_b1]).values,
+                tf.string_split([tgt_b2]).values,
+                tf.string_split([tgt_b3]).values,
+                tf.string_split([tgt_b4]).values,
+                tf.string_split([tgt_b5]).values,
+                tf.string_split([tgt_b6]).values,
+                tf.string_split([tgt_b7]).values
             ),
             num_parallel_calls=params.num_threads
         )
 
         # Append <eos> symbol
         dataset = dataset.map(
-            lambda src, tgt: (
+            lambda src, tgt, tgt_b0, tgt_b1, tgt_b2, tgt_b3, tgt_b4, 
+            tgt_b5, tgt_b6, tgt_b7: (
                 tf.concat([src, [tf.constant(params.eos)]], axis=0),
-                tf.concat([tgt, [tf.constant(params.eos)]], axis=0)
+                tf.concat([tgt, [tf.constant(params.eos)]], axis=0),
+                tf.concat([tgt_b0, [tf.constant(params.eos)]], axis=0),
+                tf.concat([tgt_b1, [tf.constant(params.eos)]], axis=0),
+                tf.concat([tgt_b2, [tf.constant(params.eos)]], axis=0),
+                tf.concat([tgt_b3, [tf.constant(params.eos)]], axis=0),
+                tf.concat([tgt_b4, [tf.constant(params.eos)]], axis=0),
+                tf.concat([tgt_b5, [tf.constant(params.eos)]], axis=0),
+                tf.concat([tgt_b6, [tf.constant(params.eos)]], axis=0),
+                tf.concat([tgt_b7, [tf.constant(params.eos)]], axis=0)
             ),
             num_parallel_calls=params.num_threads
         )
 
         # Convert to dictionary
         dataset = dataset.map(
-            lambda src, tgt: {
+            lambda src, tgt, tgt_b0, tgt_b1, tgt_b2, tgt_b3, tgt_b4, 
+            tgt_b5, tgt_b6, tgt_b7: {
                 "source": src,
                 "target": tgt,
+                "target_b0": tgt_b0,
+                "target_b1": tgt_b1,
+                "target_b2": tgt_b2,
+                "target_b3": tgt_b3,
+                "target_b4": tgt_b4,
+                "target_b5": tgt_b5,
+                "target_b6": tgt_b6,
+                "target_b7": tgt_b7,
                 "source_length": tf.shape(src),
-                "target_length": tf.shape(tgt)
+                "target_length": tf.shape(tgt),
             },
             num_parallel_calls=params.num_threads
         )
@@ -144,10 +179,12 @@ def get_training_input(filenames, params):
         # String to index lookup
         features["source"] = src_table.lookup(features["source"])
         features["target"] = tgt_table.lookup(features["target"])
-        features["source_bagofwords"],ID = tf.unique(features["source"])
-        features["target_bagofwords"],IDD = tf.unique(features["target"])
-        features["source_bagofwords_length"] = tf.shape(features["source_bagofwords"])
-        features["target_bagofwords_length"] = tf.shape(features["target_bagofwords"])  
+        for i in range(8):
+            features["target_b%s"%i] = tgt_table.lookup(features["target_b%s"%i])
+            features["target_b%s_length"%i] = tf.shape(features["target_b%s"%i])
+        features["target_bagofwords"], ID = tf.unique(features["target"])
+        features["target_bagofwords_length"] = tf.shape(features["target_bagofwords"])
+
         # Batching
         shard_multiplier = len(params.device_list) * params.update_cycle
         features = batch_examples(features, params.batch_size,
@@ -160,16 +197,18 @@ def get_training_input(filenames, params):
         # Convert to int32
         features["source"] = tf.to_int32(features["source"])
         features["target"] = tf.to_int32(features["target"])
-	features["source_bagofwords"] = tf.to_int32(features["source_bagofwords"])
+        for i in range(8):
+            features["target_b%s"%i] = tf.to_int32(features["target_b%s"%i])
+            features["target_b%s_length"%i] = tf.to_int32(features["target_b%s_length"%i])
+            features["target_b%s_length"%i] = tf.squeeze(features["target_b%s_length"%i], 1)
+
         features["target_bagofwords"] = tf.to_int32(features["target_bagofwords"])
         features["source_length"] = tf.to_int32(features["source_length"])
         features["target_length"] = tf.to_int32(features["target_length"])
-	features["source_bagofwords_length"] = tf.to_int32(features["source_bagofwords_length"])
         features["target_bagofwords_length"] = tf.to_int32(features["target_bagofwords_length"])
+        features["target_bagofwords_length"] = tf.squeeze(features["target_bagofwords_length"],1)
         features["source_length"] = tf.squeeze(features["source_length"], 1)
         features["target_length"] = tf.squeeze(features["target_length"], 1)
-	features["source_bagofwords_length"] = tf.squeeze(features["source_bagofwords_length"],1)
-        features["target_bagofwords_length"] = tf.squeeze(features["target_bagofwords_length"],1)
 
         return features
 

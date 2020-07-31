@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding=utf-8
-# Copyright 2017-2019 The THUMT Authors
+# Copyright 2018 The THUMT Authors
 
 from __future__ import absolute_import
 from __future__ import division
@@ -9,8 +9,6 @@ from __future__ import print_function
 import argparse
 import itertools
 import os
-import six
-import sys
 
 import numpy as np
 import tensorflow as tf
@@ -19,7 +17,6 @@ import thumt.data.vocab as vocabulary
 import thumt.models as models
 import thumt.utils.inference as inference
 import thumt.utils.parallel as parallel
-import thumt.utils.sampling as sampling
 
 
 def parse_args():
@@ -61,22 +58,14 @@ def default_parameters():
         unk="<unk>",
         mapping=None,
         append_eos=False,
-        device_list=[0],
-        num_threads=1,
         # decoding
         top_beams=1,
         beam_size=4,
         decode_alpha=0.6,
         decode_length=50,
         decode_batch_size=32,
-        # sampling
-        generate_samples=False,
-        num_samples=1,
-        min_length_ratio=0.0,
-        max_length_ratio=1.5,
-        min_sample_length=0,
-        max_sample_length=0,
-        sample_batch_size=32
+        device_list=[0],
+        num_threads=1
     )
 
     return params
@@ -85,12 +74,12 @@ def default_parameters():
 def merge_parameters(params1, params2):
     params = tf.contrib.training.HParams()
 
-    for (k, v) in six.iteritems(params1.values()):
+    for (k, v) in params1.values().iteritems():
         params.add_hparam(k, v)
 
     params_dict = params.values()
 
-    for (k, v) in six.iteritems(params2.values()):
+    for (k, v) in params2.values().iteritems():
         if k in params_dict:
             # Override
             setattr(params, k, v)
@@ -162,7 +151,7 @@ def session_config(params):
     return config
 
 
-def set_variables(var_list, value_dict, prefix, feed_dict):
+def set_variables(var_list, value_dict, prefix):
     ops = []
     for var in var_list:
         for name in value_dict:
@@ -170,12 +159,9 @@ def set_variables(var_list, value_dict, prefix, feed_dict):
 
             if var.name[:-2] == var_name:
                 tf.logging.debug("restoring %s -> %s" % (name, var.name))
-                placeholder = tf.placeholder(tf.float32,
-                                             name="placeholder/" + var_name)
                 with tf.device("/cpu:0"):
-                    op = tf.assign(var, placeholder)
+                    op = tf.assign(var, value_dict[name])
                     ops.append(op)
-                feed_dict[placeholder] = value_dict[name]
                 break
 
     return ops
@@ -189,21 +175,19 @@ def shard_features(features, placeholders, predictions):
     for name in features:
         feat = features[name]
         batch = feat.shape[0]
-        shard_size = (batch + num_shards - 1) // num_shards
 
-        for i in range(num_shards):
-            shard_feat = feat[i * shard_size:(i + 1) * shard_size]
+        if batch < num_shards:
+            feed_dict[placeholders[0][name]] = feat
+            n = 1
+        else:
+            shard_size = (batch + num_shards - 1) // num_shards
 
-            if shard_feat.shape[0] != 0:
+            for i in range(num_shards):
+                shard_feat = feat[i * shard_size:(i + 1) * shard_size]
                 feed_dict[placeholders[i][name]] = shard_feat
-                n = i + 1
-            else:
-                break
+                n = num_shards
 
-    if isinstance(predictions, (list, tuple)):
-        predictions = predictions[:n]
-
-    return predictions, feed_dict
+    return predictions[:n], feed_dict
 
 
 def main(args):
@@ -248,12 +232,13 @@ def main(args):
             model_var_lists.append(values)
 
         # Build models
-        model_list = []
+        model_fns = []
 
         for i in range(len(args.checkpoints)):
             name = model_cls_list[i].get_name()
             model = model_cls_list[i](params_list[i], name + "_%d" % i)
-            model_list.append(model)
+            model_fn = model.get_inference_func()
+            model_fns.append(model_fn)
 
         params = params_list[0]
         # Read input file
@@ -272,18 +257,13 @@ def main(args):
             })
 
         # A list of outputs
-        if params.generate_samples:
-            inference_fn = sampling.create_sampling_graph
-        else:
-            inference_fn = inference.create_inference_graph
-
         predictions = parallel.data_parallelism(
-            params.device_list, lambda f: inference_fn(model_list, f, params),
+            params.device_list,
+            lambda f: inference.create_inference_graph(model_fns, f, params),
             placeholders)
 
         # Create assign ops
         assign_ops = []
-        feed_dict = {}
 
         all_var_list = tf.trainable_variables()
 
@@ -296,27 +276,24 @@ def main(args):
                     un_init_var_list.append(v)
 
             ops = set_variables(un_init_var_list, model_var_lists[i],
-                                name + "_%d" % i, feed_dict)
+                                name + "_%d" % i)
             assign_ops.extend(ops)
 
         assign_op = tf.group(*assign_ops)
-        init_op = tf.tables_initializer()
         results = []
-
-        tf.get_default_graph().finalize()
 
         # Create session
         with tf.Session(config=session_config(params)) as sess:
             # Restore variables
-            sess.run(assign_op, feed_dict=feed_dict)
-            sess.run(init_op)
+            sess.run(assign_op)
+            sess.run(tf.tables_initializer())
 
             while True:
                 try:
                     feats = sess.run(features)
                     op, feed_dict = shard_features(feats, placeholders,
                                                    predictions)
-                    results.append(sess.run(op, feed_dict=feed_dict))
+                    results.append(sess.run(predictions, feed_dict=feed_dict))
                     message = "Finished batch %d" % len(results)
                     tf.logging.log(tf.logging.INFO, message)
                 except tf.errors.OutOfRangeError:
@@ -328,11 +305,13 @@ def main(args):
         scores = []
 
         for result in results:
-            for shard in result:
-                for item in shard[0]:
-                    outputs.append(item.tolist())
-                for item in shard[1]:
-                    scores.append(item.tolist())
+            for item in result[0]:
+                outputs.append(item.tolist())
+            for item in result[1]:
+                scores.append(item.tolist())
+
+        outputs = list(itertools.chain(*outputs))
+        scores = list(itertools.chain(*scores))
 
         restored_inputs = []
         restored_outputs = []
@@ -344,34 +323,29 @@ def main(args):
             restored_scores.append(scores[sorted_keys[index]])
 
         # Write to file
-        if sys.version_info.major == 2:
-            outfile = open(args.output, "w")
-        elif sys.version_info.major == 3:
-            outfile = open(args.output, "w", encoding="utf-8")
-        else:
-            raise ValueError("Unkown python running environment!")
+        with open(args.output, "w") as outfile:
+            count = 0
+            for outputs, scores in zip(restored_outputs, restored_scores):
+                for output, score in zip(outputs, scores):
+                    decoded = []
+                    for idx in output:
+                        if idx == params.mapping["target"][params.eos]:
+                            break
+                        decoded.append(vocab[idx])
 
-        count = 0
-        for outputs, scores in zip(restored_outputs, restored_scores):
-            for output, score in zip(outputs, scores):
-                decoded = []
-                for idx in output:
-                    if idx == params.mapping["target"][params.eos]:
+                    decoded = " ".join(decoded)
+
+                    if not args.verbose:
+                        outfile.write("%s\n" % decoded)
                         break
-                    decoded.append(vocab[idx])
+                    else:
+                        pattern = "%d ||| %s ||| %s ||| %f\n"
+                        source = restored_inputs[count]
+                        values = (count, source, decoded, score)
+                        outfile.write(pattern % values)
 
-                decoded = " ".join(decoded)
+                count += 1
 
-                if not args.verbose:
-                    outfile.write("%s\n" % decoded)
-                else:
-                    pattern = "%d ||| %s ||| %s ||| %f\n"
-                    source = restored_inputs[count]
-                    values = (count, source, decoded, score)
-                    outfile.write(pattern % values)
-
-            count += 1
-        outfile.close()
 
 if __name__ == "__main__":
     main(parse_args())

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding=utf-8
-# Copyright 2017-2019 The THUMT Authors
+# Copyright 2018 The THUMT Authors
 
 from __future__ import absolute_import
 from __future__ import division
@@ -9,28 +9,14 @@ from __future__ import print_function
 import argparse
 import itertools
 import os
-import six
 
-import time
-import json
 import numpy as np
 import tensorflow as tf
 import thumt.data.dataset as dataset
 import thumt.data.vocab as vocabulary
 import thumt.models as models
-
-np.set_printoptions(threshold=np.inf)
-
-
-def to_text(vocab, mapping, indice, params):
-    decoded = []
-    for idx in indice:
-        if idx == mapping[params.eos]:
-            break
-        decoded.append(vocab[idx])
-
-    decoded = " ".join(decoded)
-    return decoded
+import thumt.utils.inference as inference
+import thumt.utils.parallel as parallel
 
 
 def parse_args():
@@ -44,8 +30,6 @@ def parse_args():
                         help="Path of input file")
     parser.add_argument("--output", type=str, required=True,
                         help="Path of output file")
-    parser.add_argument("--relevances", type=str, required=True,
-                        help="Path of relevance result")
     parser.add_argument("--checkpoints", type=str, nargs="+", required=True,
                         help="Path of trained models")
     parser.add_argument("--vocabulary", type=str, nargs=2, required=True,
@@ -56,6 +40,8 @@ def parse_args():
                         help="Name of the model")
     parser.add_argument("--parameters", type=str,
                         help="Additional hyper parameters")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Enable verbose output")
 
     return parser.parse_args()
 
@@ -65,7 +51,6 @@ def default_parameters():
         input=None,
         output=None,
         vocabulary=None,
-        model=None,
         # vocabulary specific
         pad="<pad>",
         bos="<bos>",
@@ -77,13 +62,11 @@ def default_parameters():
         top_beams=1,
         beam_size=4,
         decode_alpha=0.6,
-        decode_beta=0.2,
         decode_length=50,
-        decode_batch_size=1,
-        decode_constant=5.0,
-        decode_normalize=False,
+        decode_batch_size=32,
         device_list=[0],
-        num_threads=6
+        num_threads=1,
+        outweights=True
     )
 
     return params
@@ -92,12 +75,12 @@ def default_parameters():
 def merge_parameters(params1, params2):
     params = tf.contrib.training.HParams()
 
-    for (k, v) in six.iteritems(params1.values()):
+    for (k, v) in params1.values().iteritems():
         params.add_hparam(k, v)
 
     params_dict = params.values()
 
-    for (k, v) in six.iteritems(params2.values()):
+    for (k, v) in params2.values().iteritems():
         if k in params_dict:
             # Override
             setattr(params, k, v)
@@ -108,6 +91,9 @@ def merge_parameters(params1, params2):
 
 
 def import_params(model_dir, model_name, params):
+    if model_name.startswith("experimental_"):
+        model_name = model_name[13:]
+
     model_dir = os.path.abspath(model_dir)
     m_name = os.path.join(model_dir, model_name + ".json")
 
@@ -158,9 +144,7 @@ def session_config(params):
                                             do_function_inlining=False)
     graph_options = tf.GraphOptions(optimizer_options=optimizer_options)
     config = tf.ConfigProto(allow_soft_placement=True,
-                            graph_options=graph_options,
-                            intra_op_parallelism_threads=16,
-                            inter_op_parallelism_threads=16)
+                            graph_options=graph_options)
     if params.device_list:
         device_str = ",".join([str(i) for i in params.device_list])
         config.gpu_options.visible_device_list = device_str
@@ -175,7 +159,7 @@ def set_variables(var_list, value_dict, prefix):
             var_name = "/".join([prefix] + list(name.split("/")[1:]))
 
             if var.name[:-2] == var_name:
-                tf.logging.info("restoring %s -> %s" % (name, var.name))
+                tf.logging.debug("restoring %s -> %s" % (name, var.name))
                 with tf.device("/cpu:0"):
                     op = tf.assign(var, value_dict[name])
                     ops.append(op)
@@ -184,11 +168,33 @@ def set_variables(var_list, value_dict, prefix):
     return ops
 
 
+def shard_features(features, placeholders, predictions):
+    num_shards = len(placeholders)
+    feed_dict = {}
+    n = 0
+
+    for name in features:
+        feat = features[name]
+        batch = feat.shape[0]
+
+        if batch < num_shards:
+            feed_dict[placeholders[0][name]] = feat
+            n = 1
+        else:
+            shard_size = (batch + num_shards - 1) // num_shards
+
+            for i in range(num_shards):
+                shard_feat = feat[i * shard_size:(i + 1) * shard_size]
+                feed_dict[placeholders[i][name]] = shard_feat
+                n = num_shards
+
+    return predictions[:n], feed_dict
+
+
 def main(args):
     tf.logging.set_verbosity(tf.logging.INFO)
     # Load configs
-    model_cls_list = [models.get_model(model, lrp=True)
-                      for model in args.models]
+    model_cls_list = [models.get_model(model) for model in args.models]
     params_list = [default_parameters() for _ in range(len(model_cls_list))]
     params_list = [
         merge_parameters(params, model_cls.get_parameters())
@@ -209,7 +215,7 @@ def main(args):
 
         # Load checkpoints
         for i, checkpoint in enumerate(args.checkpoints):
-            print("Loading %s" % checkpoint)
+            tf.logging.info("Loading %s" % checkpoint)
             var_list = tf.train.list_variables(checkpoint)
             values = {}
             reader = tf.train.load_checkpoint(checkpoint)
@@ -232,19 +238,32 @@ def main(args):
         for i in range(len(args.checkpoints)):
             name = model_cls_list[i].get_name()
             model = model_cls_list[i](params_list[i], name + "_%d" % i)
-            model_fn = model.get_relevance_func()
+            model_fn = model.get_inference_func()
             model_fns.append(model_fn)
 
         params = params_list[0]
         # Read input file
-        with tf.gfile.Open(args.input) as fd:
-            inputs = [line.strip() for line in fd]
-        with tf.gfile.Open(args.output) as fd:
-            outputs = [line.strip() for line in fd]
+        sorted_keys, sorted_inputs = dataset.sort_input_file(args.input)
         # Build input queue
-        features = dataset.get_relevance_input(inputs, outputs, params)
-        relevances = model_fns[0](features, params)
+        features = dataset.get_inference_input(sorted_inputs, params)
+        # Create placeholders
+        placeholders = []
 
+        for i in range(len(params.device_list)):
+            placeholders.append({
+                "source": tf.placeholder(tf.int32, [None, None],
+                                         "source_%d" % i),
+                "source_length": tf.placeholder(tf.int32, [None],
+                                                "source_length_%d" % i)
+            })
+
+        # A list of outputs
+        predictions = parallel.data_parallelism(
+            params.device_list,
+            lambda f: inference.create_inference_graph(model_fns, f, params),
+            placeholders)
+
+        # Create assign ops
         assign_ops = []
 
         all_var_list = tf.trainable_variables()
@@ -262,36 +281,92 @@ def main(args):
             assign_ops.extend(ops)
 
         assign_op = tf.group(*assign_ops)
-
-        params.add_hparam("intra_op_parallelism_threads", 1)
-        params.add_hparam("inter_op_parallelism_threads", 1)
-        sess_creator = tf.train.ChiefSessionCreator(
-            config=session_config(params)
-        )
-
         results = []
 
         # Create session
-        with tf.train.MonitoredSession(session_creator=sess_creator) as sess:
+        with tf.Session(config=session_config(params)) as sess:
             # Restore variables
             sess.run(assign_op)
-            if not os.path.exists(args.relevances):
-                os.makedirs(args.relevances)
+            sess.run(tf.tables_initializer())
+
+            while True:
+                try:
+                    feats = sess.run(features)
+                    op, feed_dict = shard_features(feats, placeholders,
+                                                   predictions)
+                    results.append(sess.run(predictions, feed_dict=feed_dict))
+                    message = "Finished batch %d" % len(results)
+                    tf.logging.log(tf.logging.INFO, message)
+                except tf.errors.OutOfRangeError:
+                    break
+
+        # Convert to plain text
+        vocab = params.vocabulary["target"]
+        outputs = []
+        scores = []
+        enc_atts =[]
+        dec_atts =[]
+        encdec_atts =[]
+		
+        for result in results:
+            for item in result[0]:
+                outputs.append(item.tolist())
+            for item in result[1]:
+                scores.append(item.tolist())
+            if params.outweights:
+                #for item in result[2]:
+		print(result[2][0].shape)
+		print(result[3][0].shape)
+		print(result[4][0].shape)
+                with open(args.output+"atts.enc", "w") as outfile: outfile.write("%s\n" % result[2])
+                with open(args.output+"atts.dec", "w") as outfile: outfile.write("%s\n" % result[3])
+                with open(args.output+"atts.encdec", "w") as outfile: outfile.write("%s\n" % result[4])
+                #enc_atts.append(result[2])
+		#dec_atts.append(result[3])
+		#encdec_atts.append(result[4])
+        #if params.outweights:				
+            #with open(args.output+"atts.enc", "w") as outfile:
+		#outfile.write(enc_atts)
+            #with open(args.output+"atts.dec", "w") as outfile:
+		#outfile.write(dec_atts)
+            #with open(args.output+"atts.encdec", "w") as outfile:
+		#outfile.write(encdec_atts)
+			
+        outputs = list(itertools.chain(*outputs))
+        scores = list(itertools.chain(*scores))
+
+        restored_inputs = []
+        restored_outputs = []
+        restored_scores = []
+
+        for index in range(len(sorted_inputs)):
+            restored_inputs.append(sorted_inputs[sorted_keys[index]])
+            restored_outputs.append(outputs[sorted_keys[index]])
+            restored_scores.append(scores[sorted_keys[index]])
+
+        # Write to file
+        with open(args.output, "w") as outfile:
             count = 0
-            while not sess.should_stop():
-                src_seq, trg_seq, rlv_info, loss = sess.run(relevances)
-                message = "Finished batch"" %d" % count
-                for i in range(src_seq.shape[0]):
-                    count += 1
-                    src = to_text(params.vocabulary["source"],
-                                  params.mapping["source"], src_seq[i], params)
-                    trg = to_text(params.vocabulary["target"],
-                                  params.mapping["target"], trg_seq[i], params)
-                    output = open(args.relevances + "/" + str(count), "w")
-                    output.write("src: " + src + "\n")
-                    output.write("trg: " + trg + "\n")
-                    output.write("result: %s\n" % str(rlv_info["result"][i]))
-                tf.logging.log(tf.logging.INFO, message)
+            for outputs, scores in zip(restored_outputs, restored_scores):
+                for output, score in zip(outputs, scores):
+                    decoded = []
+                    for idx in output:
+                        if idx == params.mapping["target"][params.eos]:
+                            break
+                        decoded.append(vocab[idx])
+
+                    decoded = " ".join(decoded)
+
+                    if not args.verbose:
+                        outfile.write("%s\n" % decoded)
+                        break
+                    else:
+                        pattern = "%d ||| %s ||| %s ||| %f\n"
+                        source = restored_inputs[count]
+                        values = (count, source, decoded, score)
+                        outfile.write(pattern % values)
+
+                count += 1
 
 
 if __name__ == "__main__":

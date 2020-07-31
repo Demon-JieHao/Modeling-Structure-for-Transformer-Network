@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2017-2019 The THUMT Authors
+# Copyright 2018 The THUMT Authors
 
 from __future__ import absolute_import
 from __future__ import division
@@ -11,7 +11,6 @@ import os
 
 import tensorflow as tf
 import thumt.utils.bleu as bleu
-import thumt.utils.parallel as parallel
 
 
 def _get_saver():
@@ -44,7 +43,7 @@ def _read_checkpoint_def(filename):
         fd.readline()
 
         for line in fd:
-            records.append(line.strip().split(":")[-1].strip()[1:-1].split("/")[-1])
+            records.append(line.strip().split(":")[-1].strip()[1:-1])
 
     return records
 
@@ -83,6 +82,12 @@ def _read_score_record(filename):
 
     return records
 
+def _save_score_to_history(filename, record):
+
+    with tf.gfile.GFile(filename, "a") as fd:
+        checkpoint_name, score = record
+        fd.write("\"%s\": %f\n" % (checkpoint_name, score))	
+	
 
 def _save_score_record(filename, records):
     keys = []
@@ -131,47 +136,17 @@ def _add_to_record(records, record, max_to_keep):
     return added, removed, records
 
 
-def _shard_features(features, placeholders, predictions):
-    num_shards = len(placeholders)
-    feed_dict = {}
-    n = 0
-
-    for name in features:
-        feat = features[name]
-        batch = feat.shape[0]
-        shard_size = (batch + num_shards - 1) // num_shards
-
-        for i in range(num_shards):
-            shard_feat = feat[i * shard_size:(i + 1) * shard_size]
-
-            if shard_feat.shape[0] != 0:
-                feed_dict[placeholders[i][name]] = shard_feat
-                n = i + 1
-            else:
-                break
-
-    if isinstance(predictions, (list, tuple)):
-        predictions = predictions[:n]
-
-    return predictions, feed_dict
-
-
-def _evaluate(eval_fn, input_fn, decode_fn, path, config, device_list):
+def _evaluate(eval_fn, input_fn, decode_fn, path, config):
     graph = tf.Graph()
     with graph.as_default():
         features = input_fn()
         refs = features["references"]
-        placeholders = []
-        for i in range(len(device_list)):
-            placeholders.append({
-                "source": tf.placeholder(tf.int32, [None, None],
-                                         "source_%d" % i),
-                "source_length": tf.placeholder(tf.int32, [None],
-                                                "source_length_%d" % i)
-            })
-        predictions = parallel.data_parallelism(
-            device_list, eval_fn, placeholders)
-        predictions = [pred[0][:, 0, :] for pred in predictions]
+        placeholders = {
+            "source": tf.placeholder(tf.int32, [None, None], "source"),
+            "source_length": tf.placeholder(tf.int32, [None], "source_length")
+        }
+        predictions = eval_fn(placeholders)
+        predictions = predictions[0][:, 0, :]
 
         all_refs = [[] for _ in range(len(refs))]
         all_outputs = []
@@ -184,32 +159,40 @@ def _evaluate(eval_fn, input_fn, decode_fn, path, config, device_list):
         with tf.train.MonitoredSession(session_creator=sess_creator) as sess:
             while not sess.should_stop():
                 feats = sess.run(features)
-                inp_feats = {
-                    "source": feats["source"],
-                    "source_length": feats["source_length"]
-                }
-                op, feed_dict = _shard_features(inp_feats, placeholders,
-                                                predictions)
-                # A list of numpy array with shape: [batch, len]
-                outputs = sess.run(op, feed_dict=feed_dict)
-
-                for shard in outputs:
-                    all_outputs.extend(shard.tolist())
-
+                outputs = sess.run(predictions, feed_dict={
+                    placeholders["source"]: feats["source"],
+                    placeholders["source_length"]: feats["source_length"]
+                })
+                # shape: [batch, len]
+                outputs = outputs.tolist()
                 # shape: ([batch, len], ..., [batch, len])
                 references = [item.tolist() for item in feats["references"]]
+
+                all_outputs.extend(outputs)
 
                 for i in range(len(refs)):
                     all_refs[i].extend(references[i])
 
         decoded_symbols = decode_fn(all_outputs)
-
-        for i, l in enumerate(decoded_symbols):
-            decoded_symbols[i] = " ".join(l).replace("@@ ", "").split()
-
         decoded_refs = [decode_fn(refs) for refs in all_refs]
         decoded_refs = [list(x) for x in zip(*decoded_refs)]
-
+		
+        save_path_bpe = os.path.join(path, 'model.ckpt-'  + '.pred.bpe')
+        save_path_norm = os.path.join(path, 'model.ckpt-'  + '.pred.norm')
+        with open(save_path_bpe, 'w') as f:
+            for sent in decoded_symbols:
+                sent = ' '.join(sent) + '\n'
+                f.write(sent)
+            # Restore from BPE
+        cmd = "sed -r 's/(@@ )|(@@ ?$)//g' < %s > %s" % (save_path_bpe, save_path_norm)
+        os.system(cmd)
+            # Reload prediction after restoration
+        decoded_symbols = []
+        with open(save_path_norm, 'r') as f:
+            for line in f:
+                sent = line.strip().split()
+                decoded_symbols.append(sent)		
+				
         return bleu.bleu(decoded_symbols, decoded_refs)
 
 
@@ -219,7 +202,7 @@ class EvaluationHook(tf.train.SessionRunHook):
     """
 
     def __init__(self, eval_fn, eval_input_fn, eval_decode_fn, base_dir,
-                 session_config, device_list=None, max_to_keep=5, eval_secs=None,
+                 session_config, max_to_keep=5, eval_secs=None,
                  eval_steps=None, metric="BLEU"):
         """ Initializes a `EvaluationHook`.
         :param eval_fn: A function with signature (feature)
@@ -241,12 +224,9 @@ class EvaluationHook(tf.train.SessionRunHook):
 
         self._base_dir = base_dir.rstrip("/")
         self._session_config = session_config
-        if isinstance(device_list, list):
-            self._device_list = device_list
-        else:
-            self._device_list = [0]
         self._save_path = os.path.join(base_dir, "eval")
         self._record_name = os.path.join(self._save_path, "record")
+        self._eval_history_name = os.path.join(self._save_path, "eval_history")		
         self._log_name = os.path.join(self._save_path, "log")
         self._eval_fn = eval_fn
         self._eval_input_fn = eval_input_fn
@@ -306,8 +286,7 @@ class EvaluationHook(tf.train.SessionRunHook):
                 score = _evaluate(self._eval_fn, self._eval_input_fn,
                                   self._eval_decode_fn,
                                   self._base_dir,
-                                  self._session_config,
-                                  self._device_list)
+                                  self._session_config)
                 tf.logging.info("%s at step %d: %f" %
                                 (self._metric, global_step, score))
 
@@ -326,11 +305,11 @@ class EvaluationHook(tf.train.SessionRunHook):
                     old_path = os.path.join(self._base_dir, added)
                     new_path = os.path.join(self._save_path, added)
                     old_files = tf.gfile.Glob(old_path + "*")
-                    tf.logging.info("Copying %s to %s" % (old_path, new_path))
+                    tf.logging.info("Moving %s to %s" % (old_path, new_path))
 
                     for o_file in old_files:
                         n_file = o_file.replace(old_path, new_path)
-                        tf.gfile.Copy(o_file, n_file, overwrite=True)
+                        tf.gfile.Rename(o_file, n_file, overwrite=True)
 
                 if removed is not None:
                     filename = os.path.join(self._save_path, removed)
@@ -346,7 +325,8 @@ class EvaluationHook(tf.train.SessionRunHook):
                 )
                 _save_checkpoint_def(checkpoint_filename,
                                      [item[0] for item in records])
-
+                _save_score_to_history(self._eval_history_name, record)
+				
                 best_score = records[0][1]
                 tf.logging.info("Best score at step %d: %f" %
                                 (global_step, best_score))
@@ -360,8 +340,7 @@ class EvaluationHook(tf.train.SessionRunHook):
             score = _evaluate(self._eval_fn, self._eval_input_fn,
                               self._eval_decode_fn,
                               self._base_dir,
-                              self._session_config,
-                              self._device_list)
+                              self._session_config)
             tf.logging.info("%s at step %d: %f" %
                             (self._metric, global_step, score))
 
@@ -401,28 +380,3 @@ class EvaluationHook(tf.train.SessionRunHook):
 
             best_score = records[0][1]
             tf.logging.info("Best score: %f" % best_score)
-
-
-class MultiStepHook(tf.train.SessionRunHook):
-
-    def __init__(self, hook, step=1):
-        self._hook = hook
-        self._step = step
-        self._iter = 0 if step == 1 else 1
-
-    def begin(self):
-        self._hook.begin()
-
-    def after_create_session(self, session, coord):
-        self._hook.after_create_session(session, coord)
-
-    def before_run(self, run_context):
-        return self._hook.before_run(run_context)
-
-    def after_run(self, run_context, run_values):
-        if self._iter % self._step == 0:
-            self._hook.after_run(run_context, run_values)
-        self._iter = (self._iter + 1) % self._step
-
-    def end(self, session):
-        self._hook.end(session)

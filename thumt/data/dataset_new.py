@@ -144,10 +144,8 @@ def get_training_input(filenames, params):
         # String to index lookup
         features["source"] = src_table.lookup(features["source"])
         features["target"] = tgt_table.lookup(features["target"])
-        features["source_bagofwords"],ID = tf.unique(features["source"])
-        features["target_bagofwords"],IDD = tf.unique(features["target"])
-        features["source_bagofwords_length"] = tf.shape(features["source_bagofwords"])
-        features["target_bagofwords_length"] = tf.shape(features["target_bagofwords"])  
+        features["source_bagofwords"],ID = tf.unique(feature["source"])
+        features["source_bagofwords_length"] = tf.shape(features["source_bagofwords"])  
         # Batching
         shard_multiplier = len(params.device_list) * params.update_cycle
         features = batch_examples(features, params.batch_size,
@@ -161,15 +159,12 @@ def get_training_input(filenames, params):
         features["source"] = tf.to_int32(features["source"])
         features["target"] = tf.to_int32(features["target"])
 	features["source_bagofwords"] = tf.to_int32(features["source_bagofwords"])
-        features["target_bagofwords"] = tf.to_int32(features["target_bagofwords"])
         features["source_length"] = tf.to_int32(features["source_length"])
         features["target_length"] = tf.to_int32(features["target_length"])
 	features["source_bagofwords_length"] = tf.to_int32(features["source_bagofwords_length"])
-        features["target_bagofwords_length"] = tf.to_int32(features["target_bagofwords_length"])
         features["source_length"] = tf.squeeze(features["source_length"], 1)
         features["target_length"] = tf.squeeze(features["target_length"], 1)
 	features["source_bagofwords_length"] = tf.squeeze(features["source_bagofwords_length"],1)
-        features["target_bagofwords_length"] = tf.squeeze(features["target_bagofwords_length"],1)
 
         return features
 
