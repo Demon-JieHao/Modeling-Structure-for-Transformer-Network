@@ -424,14 +424,10 @@ class Transformer(interface.NMTModel):
                     "encoder": encoder_output,
                     "decoder": {
                         "layer_%d" % i: {
-                            "key": tf.zeros([batch, 0, params.hidden_size])
-                        }
-                        for i in range(3)
-                        "layer_%d" % i: {
                             "key": tf.zeros([batch, 0, params.hidden_size]),
                             "value": tf.zeros([batch, 0, params.hidden_size])
                         }
-                        for i in range(3, params.num_decoder_layers)
+                        for i in range(params.num_decoder_layers)
                     }
                 }
             return state
