@@ -91,6 +91,7 @@ def _gru_encoder(cell, inputs, initial_state, tgt_len, state=None, dtype=None):
     if state is not None:
         inputs = tf.concat([state["key"], inputs], axis=1)
         next_state["key"] = inputs
+        next_state["value"] = inputs
         #inputs1 = inputs1[:, -1:, :]
     batch = tf.shape(inputs)[0]
     time_steps = tf.shape(inputs)[1]
