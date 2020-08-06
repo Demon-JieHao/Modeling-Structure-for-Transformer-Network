@@ -158,7 +158,7 @@ def transformer_decoder(inputs, memory, bias, mem_bias, sequence_length, params,
             with tf.variable_scope(layer_name):
                 layer_state = state[layer_name] if state is not None else None
 
-                if layer<3:
+                if layer>2:
                     with tf.variable_scope("on-lstm"):
                         with tf.variable_scope("forward"):
                             outputs = _gru_encoder(cell_fw, x, None, sequence_length, state=layer_state, dtype=dtype) 
