@@ -311,7 +311,7 @@ def encoding_graph(features, mode, params):
         keep_prob = 1.0 - params.residual_dropout
         encoder_input = tf.nn.dropout(encoder_input, keep_prob)
 
-    encoder_output = transformer_encoder(encoder_input, enc_attn_bias, params)
+    encoder_output = transformer_encoder(encoder_input, enc_attn_bias, src_len, params)
 
     return encoder_output
 
