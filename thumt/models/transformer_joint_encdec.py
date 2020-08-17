@@ -307,9 +307,8 @@ def transformer_decoder(inputs, memory, bias, mem_bias, sequence_length, params,
                 if layer==2: onlstm_output = x
 
         outputs = _layer_process(x, params.layer_preprocess)
-        if layer==5:
-            outputs = _residual_fn(outputs, onlstm_output, 1.0-params.residual_dropout)
-            outputs = _layer_process(outputs, params.layer_postprocess)
+        outputs = _residual_fn(outputs, onlstm_output, 1.0-params.residual_dropout)
+        outputs = _layer_process(outputs, params.layer_postprocess)
 
         if state is not None:
             return outputs, next_state
