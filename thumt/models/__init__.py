@@ -10,6 +10,7 @@ import thumt.models.rnnsearch
 import thumt.models.transformer
 import thumt.models.transformer_onlstm_decoder
 import thumt.models.transformer_joint_encdec
+import thumt.models.transformer_hybrid_encoder
 
 def get_model(name):
     name = name.lower()
@@ -24,5 +25,7 @@ def get_model(name):
 	   return thumt.models.transformer_onlstm_decoder.Transformer
     elif name == "transformer_joint_encdec":
         return thumt.models.transformer_joint_encdec.Transformer
+    elif name == "transformer_hybrid_encoder":
+        return thumt.models.transformer_hybrid_encoder.Transformer
     else:
         raise LookupError("Unknown model %s" % name)
