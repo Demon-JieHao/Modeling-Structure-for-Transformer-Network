@@ -83,10 +83,10 @@ def default_parameters():
         learning_rate_decay="linear_warmup_rsqrt_decay",
         learning_rate_boundaries=[0],
         learning_rate_values=[0.0],
-        keep_checkpoint_max=20,
+        keep_checkpoint_max=5,
         keep_top_checkpoint_max=5,
         # Validation
-        eval_steps=2000,
+        eval_steps=500,
         eval_secs=0,
         eval_batch_size=32,
         top_beams=1,
@@ -96,7 +96,7 @@ def default_parameters():
         validation="",
         references=[""],
         save_checkpoint_secs=0,
-        save_checkpoint_steps=1000,
+        save_checkpoint_steps=500,
         only_save_trainable=True
     )
 
